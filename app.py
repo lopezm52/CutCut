@@ -88,6 +88,18 @@ def validate_api_key(x_api_key: Optional[str] = Header(None)):
         raise HTTPException(status_code=401, detail="API key inválida")
     return x_api_key
 
+def get_ffmpeg_format(format_name: str) -> str:
+    """Mapea el formato solicitado al formato FFmpeg correcto"""
+    format_map = {
+        'mp3': 'mp3',
+        'wav': 'wav',
+        'flac': 'flac',
+        'ogg': 'ogg',
+        'm4a': 'mp4',  # M4A usa contenedor MP4 en FFmpeg
+        'aac': 'adts'  # AAC usa contenedor ADTS
+    }
+    return format_map.get(format_name.lower(), 'mp3')
+
 def get_mime_type(format_name: str) -> str:
     """Obtiene el MIME type para un formato de audio"""
     return SUPPORTED_FORMATS.get(format_name.lower(), "application/octet-stream")
@@ -137,7 +149,8 @@ def split_audio_to_chunks(
 def audio_segment_to_base64(audio: AudioSegment, format_name: str) -> str:
     """Convierte un AudioSegment a base64 en el formato especificado"""
     buffer = BytesIO()
-    audio.export(buffer, format=format_name)
+    ffmpeg_format = get_ffmpeg_format(format_name)
+    audio.export(buffer, format=ffmpeg_format)
     buffer.seek(0)
     return base64.b64encode(buffer.read()).decode('utf-8')
 
