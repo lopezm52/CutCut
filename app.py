@@ -129,20 +129,22 @@ def split_audio_to_chunks(
     
     start = 0
     chunk_index = 0
+    step = chunk_duration_ms - overlap_ms  # Paso real entre chunks
     
     while start < audio_length and chunk_index < MAX_CHUNKS:
         end = min(start + chunk_duration_ms, audio_length)
-        chunk = audio[start:end]
-        chunks.append(chunk)
         
-        # El siguiente chunk empieza con overlap
-        start = end - overlap_ms
-        
-        # Si el overlap es mayor que lo que queda, terminar
-        if start >= audio_length:
+        # Solo agregar chunk si tiene contenido mínimo (>1 segundo)
+        if end - start > 1000:
+            chunk = audio[start:end]
+            chunks.append(chunk)
+            chunk_index += 1
+        else:
+            # Si el chunk restante es muy pequeño, terminar
             break
-            
-        chunk_index += 1
+        
+        # Avanzar al siguiente chunk
+        start += step
     
     return chunks
 
@@ -243,12 +245,16 @@ async def split_audio(
             
             # Convertir chunks a base64
             chunk_data = []
+            current_start = 0
+            
             for i, chunk in enumerate(chunks):
-                start_ms = i * (chunk_duration_ms - overlap_duration_ms)
-                if i == 0:
-                    start_ms = 0
-                
+                # Calcular start_ms correctamente basado en la posición real
+                start_ms = current_start
                 end_ms = min(start_ms + len(chunk), original_duration_ms)
+                
+                # Solo procesar chunks que tengan contenido real
+                if start_ms >= original_duration_ms:
+                    break
                 
                 chunk_b64 = audio_segment_to_base64(chunk, format.lower())
                 
@@ -261,6 +267,9 @@ async def split_audio(
                     "base64": chunk_b64
                 }
                 chunk_data.append(chunk_info)
+                
+                # Actualizar posición para el siguiente chunk
+                current_start = end_ms - overlap_duration_ms
             
             # Preparar respuesta
             response = {
