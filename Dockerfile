@@ -20,7 +20,7 @@ COPY . .
 RUN mkdir -p /tmp/audio
 
 # Exponer puerto
-EXPOSE 8000
+EXPOSE 3000
 
 # Configurar variables de entorno por defecto
 ENV API_KEY=your-secret-api-key-here
@@ -28,4 +28,4 @@ ENV MAX_UPLOAD_MB=100
 ENV MAX_CHUNKS=50
 
 # Comando para ejecutar la aplicación
-CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "3000"]

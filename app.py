@@ -2,10 +2,12 @@ import os
 import re
 import base64
 import tempfile
+import secrets
 from typing import Optional, List, Dict, Any
 from io import BytesIO
 
 from fastapi import FastAPI, File, UploadFile, HTTPException, Header, Query, Depends
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import JSONResponse
 from pydub import AudioSegment
 from pydub.utils import which
@@ -82,10 +84,18 @@ def parse_time_duration(duration_str: str) -> int:
     except ValueError:
         raise ValueError(f"Formato de duración no válido: {duration_str}")
 
-def validate_api_key(x_api_key: Optional[str] = Header(None)):
-    """Valida la API key del header X-API-Key"""
-    if x_api_key != API_KEY:
-        raise HTTPException(status_code=401, detail="API key inválida")
+async def validate_api_key(x_api_key: str = Header(..., alias="X-API-Key")):
+    """
+    Validates the API Key provided in the header.
+    """
+    if not API_KEY:
+        # If no API key is configured, allow all requests (development mode)
+        # Ideally, log a warning here.
+        return x_api_key
+
+    if not secrets.compare_digest(x_api_key, API_KEY):
+        raise HTTPException(status_code=401, detail="Invalid API Key")
+    
     return x_api_key
 
 def get_ffmpeg_format(format_name: str) -> str:
@@ -156,6 +166,61 @@ def audio_segment_to_base64(audio: AudioSegment, format_name: str) -> str:
     buffer.seek(0)
     return base64.b64encode(buffer.read()).decode('utf-8')
 
+def process_audio_sync(
+    file_content: bytes,
+    chunk_ms: int,
+    overlap_ms: int,
+    format_name: str,
+    original_filename: str
+) -> Dict[str, Any]:
+    """
+    Synchronous function to process audio splitting.
+    This should be run in a threadpool to avoid blocking the event loop.
+    """
+    # Create a temporary file to handle format detection better or use BytesIO
+    # Pydub handles BytesIO well for most formats
+    file_obj = BytesIO(file_content)
+    
+    try:
+        # Load audio
+        audio = AudioSegment.from_file(file_obj)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Error decoding audio file: {str(e)}")
+
+    # Split audio
+    chunks = split_audio_to_chunks(audio, chunk_ms, overlap_ms)
+    
+    # Convert chunks to base64
+    result_chunks = []
+    mime_type = get_mime_type(format_name)
+    
+    for i, chunk_audio in enumerate(chunks):
+        base64_data = audio_segment_to_base64(chunk_audio, format_name)
+        
+        # Calculate timestamps
+        start_ms = i * (chunk_ms - overlap_ms)
+        end_ms = start_ms + len(chunk_audio)
+        
+        result_chunks.append({
+            "index": i,
+            "start_ms": start_ms,
+            "end_ms": end_ms,
+            "duration_ms": len(chunk_audio),
+            "format": format_name,
+            "mime_type": mime_type,
+            "data": base64_data
+        })
+        
+    return {
+        "filename": original_filename,
+        "original_duration_ms": len(audio),
+        "chunk_duration_ms": chunk_ms,
+        "overlap_ms": overlap_ms,
+        "total_chunks": len(chunks),
+        "format": format_name,
+        "chunks": result_chunks
+    }
+
 @app.get("/")
 async def root():
     """Endpoint de salud del servicio"""
@@ -189,111 +254,64 @@ async def split_audio(
         format: Formato de salida (opcional, default mp3)
         
     Returns:
-        JSON con metadatos y chunks en base64
+        JSON con los chunks en base64 y metadatos
     """
+    # Validar formato de salida
+    format_name = format.lower()
+    if format_name not in SUPPORTED_FORMATS:
+        raise HTTPException(
+            status_code=400, 
+            detail=f"Formato no soportado. Formatos válidos: {', '.join(SUPPORTED_FORMATS.keys())}"
+        )
+    
+    # Parsear duraciones
     try:
-        # Validar formato de salida
-        if format.lower() not in SUPPORTED_FORMATS:
-            raise HTTPException(
-                status_code=400, 
-                detail=f"Formato no soportado: {format}. Formatos válidos: {list(SUPPORTED_FORMATS.keys())}"
-            )
+        chunk_ms = parse_time_duration(chunk)
+        overlap_ms = parse_time_duration(overlap)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
         
-        # Validar tamaño del archivo
-        file_size_mb = len(await file.read()) / (1024 * 1024)
-        await file.seek(0)  # Resetear posición del archivo
+    # Validaciones lógicas
+    if chunk_ms < 1000:
+        raise HTTPException(status_code=400, detail="El tamaño del chunk debe ser al menos 1 segundo")
         
-        if file_size_mb > MAX_UPLOAD_MB:
-            raise HTTPException(
+    if overlap_ms >= chunk_ms:
+        raise HTTPException(status_code=400, detail="El overlap debe ser menor que el tamaño del chunk")
+
+    # Validar tamaño del archivo (aproximado)
+    # Nota: file.size no siempre está disponible o es preciso hasta leerlo, 
+    # pero podemos verificar el Content-Length header si existe.
+    # Aquí leemos el archivo en memoria, lo cual consume RAM.
+    # Para archivos muy grandes, esto podría ser un problema, pero dado el requerimiento actual:
+    
+    try:
+        content = await file.read()
+        
+        if len(content) > MAX_UPLOAD_MB * 1024 * 1024:
+             raise HTTPException(
                 status_code=413, 
-                detail=f"Archivo demasiado grande. Máximo permitido: {MAX_UPLOAD_MB}MB"
+                detail=f"El archivo excede el límite de {MAX_UPLOAD_MB}MB"
             )
+            
+        # Procesar en threadpool para no bloquear el event loop
+        result = await run_in_threadpool(
+            process_audio_sync,
+            content,
+            chunk_ms,
+            overlap_ms,
+            format_name,
+            file.filename or "audio"
+        )
         
-        # Parsear duración del chunk y overlap
-        try:
-            chunk_duration_ms = parse_time_duration(chunk)
-            overlap_duration_ms = parse_time_duration(overlap)
-        except ValueError as e:
-            raise HTTPException(status_code=400, detail=str(e))
+        return JSONResponse(content=result)
         
-        # Validar que overlap no sea mayor que chunk
-        if overlap_duration_ms >= chunk_duration_ms:
-            raise HTTPException(
-                status_code=400, 
-                detail="El overlap no puede ser mayor o igual que la duración del chunk"
-            )
-        
-        # Crear archivo temporal para procesar
-        with tempfile.NamedTemporaryFile(delete=False) as temp_file:
-            content = await file.read()
-            temp_file.write(content)
-            temp_file_path = temp_file.name
-        
-        try:
-            # Cargar audio con pydub
-            audio = AudioSegment.from_file(temp_file_path)
-            original_duration_ms = len(audio)
-            
-            # Dividir en chunks
-            chunks = split_audio_to_chunks(audio, chunk_duration_ms, overlap_duration_ms)
-            
-            if len(chunks) > MAX_CHUNKS:
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"Demasiados chunks generados ({len(chunks)}). Máximo permitido: {MAX_CHUNKS}"
-                )
-            
-            # Convertir chunks a base64
-            chunk_data = []
-            current_start = 0
-            
-            for i, chunk in enumerate(chunks):
-                # Calcular start_ms correctamente basado en la posición real
-                start_ms = current_start
-                end_ms = min(start_ms + len(chunk), original_duration_ms)
-                
-                # Solo procesar chunks que tengan contenido real
-                if start_ms >= original_duration_ms:
-                    break
-                
-                chunk_b64 = audio_segment_to_base64(chunk, format.lower())
-                
-                chunk_info = {
-                    "index": i,
-                    "start_ms": start_ms,
-                    "end_ms": end_ms,
-                    "duration_ms": len(chunk),
-                    "mime_type": get_mime_type(format),
-                    "base64": chunk_b64
-                }
-                chunk_data.append(chunk_info)
-                
-                # Actualizar posición para el siguiente chunk
-                current_start = end_ms - overlap_duration_ms
-            
-            # Preparar respuesta
-            response = {
-                "filename": file.filename,
-                "original_duration_ms": original_duration_ms,
-                "chunk_duration_ms": chunk_duration_ms,
-                "overlap_duration_ms": overlap_duration_ms,
-                "output_format": format.lower(),
-                "total_chunks": len(chunks),
-                "chunks": chunk_data
-            }
-            
-            return JSONResponse(content=response)
-            
-        finally:
-            # Limpiar archivo temporal
-            if os.path.exists(temp_file_path):
-                os.unlink(temp_file_path)
-                
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error procesando audio: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Error interno procesando el audio: {str(e)}")
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run(app, host="0.0.0.0", port=3000)
