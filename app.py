@@ -5,20 +5,21 @@ import secrets
 import shutil
 import subprocess
 import tempfile
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, File, Header, HTTPException, Query, UploadFile
 from fastapi.concurrency import run_in_threadpool
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
 
 load_dotenv()
 
 app = FastAPI(
     title="CutCut Audio Microservice",
     description="Split audio files and extract lightweight samples using ffmpeg.",
-    version="1.1.0",
+    version="1.2.0",
 )
 
 API_KEY = os.getenv("API_KEY", "default-api-key")
@@ -26,6 +27,9 @@ MAX_UPLOAD_MB = int(os.getenv("MAX_UPLOAD_MB", "100"))
 MAX_CHUNKS = int(os.getenv("MAX_CHUNKS", "50"))
 FFMPEG_TIMEOUT_SECONDS = int(os.getenv("FFMPEG_TIMEOUT_SECONDS", "1800"))
 UPLOAD_READ_SIZE = 1024 * 1024
+JOB_DIR = Path(os.getenv("JOB_DIR", "/tmp/cutcut_jobs"))
+CHUNK_TTL_SECONDS = int(os.getenv("CHUNK_TTL_SECONDS", "3600"))
+PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", "").rstrip("/")
 
 SUPPORTED_FORMATS = {
     "mp3": "audio/mpeg",
@@ -233,6 +237,17 @@ def encode_file_base64(file_path: Path) -> str:
         return base64.b64encode(handle.read()).decode("utf-8")
 
 
+def cleanup_old_jobs() -> None:
+    JOB_DIR.mkdir(parents=True, exist_ok=True)
+    cutoff = time.time() - CHUNK_TTL_SECONDS
+    for child in JOB_DIR.iterdir():
+        try:
+            if child.is_dir() and child.stat().st_mtime < cutoff:
+                shutil.rmtree(child, ignore_errors=True)
+        except FileNotFoundError:
+            continue
+
+
 def make_chunk(
     input_path: Path,
     output_dir: Path,
@@ -240,8 +255,11 @@ def make_chunk(
     start_ms: int,
     duration_ms: int,
     format_name: str,
+    include_base64: bool = True,
+    public_path: Optional[str] = None,
 ) -> Dict[str, Any]:
-    output_path = output_dir / f"chunk_{index:04d}.{format_name}"
+    filename = f"chunk_{index:04d}.{format_name}"
+    output_path = output_dir / filename
     run_command(
         build_ffmpeg_extract_command(
             input_path=input_path,
@@ -251,17 +269,25 @@ def make_chunk(
             format_name=format_name,
         )
     )
-    encoded = encode_file_base64(output_path)
-    return {
+    chunk = {
         "index": index,
         "start_ms": start_ms,
         "end_ms": start_ms + duration_ms,
         "duration_ms": duration_ms,
         "format": format_name,
         "mime_type": get_mime_type(format_name),
-        "base64": encoded,
-        "data": encoded,
+        "filename": filename,
+        "size_bytes": output_path.stat().st_size,
     }
+    if include_base64:
+        encoded = encode_file_base64(output_path)
+        chunk["base64"] = encoded
+        chunk["data"] = encoded
+    if public_path:
+        chunk["path"] = public_path
+        if PUBLIC_BASE_URL:
+            chunk["url"] = f"{PUBLIC_BASE_URL}{public_path}"
+    return chunk
 
 
 def split_audio_sync(
@@ -271,6 +297,7 @@ def split_audio_sync(
     format_name: str,
     original_filename: str,
     original_size_bytes: int,
+    delivery: str,
 ) -> Dict[str, Any]:
     audio_info = get_audio_info(input_path)
     duration_ms = audio_info["duration_ms"]
@@ -279,13 +306,24 @@ def split_audio_sync(
     if len(starts) > MAX_CHUNKS:
         starts = starts[:MAX_CHUNKS]
 
-    with tempfile.TemporaryDirectory(prefix="cutcut_chunks_") as output_dir_name:
-        output_dir = Path(output_dir_name)
+    job_id = None
+    temp_dir = None
+    if delivery == "url":
+        cleanup_old_jobs()
+        job_id = secrets.token_urlsafe(16)
+        output_dir = JOB_DIR / job_id
+        output_dir.mkdir(parents=True, exist_ok=False)
+    else:
+        temp_dir = tempfile.TemporaryDirectory(prefix="cutcut_chunks_")
+        output_dir = Path(temp_dir.name)
+
+    try:
         chunks = []
         for index, start_ms in enumerate(starts):
             actual_duration_ms = min(chunk_ms, duration_ms - start_ms)
             if actual_duration_ms < 1000:
                 continue
+            public_path = f"/chunks/{job_id}/chunk_{index:04d}.{format_name}" if job_id else None
             chunks.append(
                 make_chunk(
                     input_path=input_path,
@@ -294,10 +332,15 @@ def split_audio_sync(
                     start_ms=start_ms,
                     duration_ms=actual_duration_ms,
                     format_name=format_name,
+                    include_base64=delivery == "base64",
+                    public_path=public_path,
                 )
             )
+    finally:
+        if temp_dir is not None:
+            temp_dir.cleanup()
 
-    return {
+    result = {
         "filename": original_filename,
         "original_duration_ms": duration_ms,
         "original_size_bytes": original_size_bytes,
@@ -308,8 +351,13 @@ def split_audio_sync(
         "max_chunks": MAX_CHUNKS,
         "format": format_name,
         "output_format": format_name,
+        "delivery": delivery,
         "chunks": chunks,
     }
+    if job_id:
+        result["job_id"] = job_id
+        result["chunk_ttl_seconds"] = CHUNK_TTL_SECONDS
+    return result
 
 
 def sample_audio_sync(
@@ -363,9 +411,9 @@ async def root() -> Dict[str, Any]:
     return {
         "service": "CutCut Audio Microservice",
         "status": "healthy",
-        "version": "1.1.0",
+        "version": "1.2.0",
         "supported_formats": list(SUPPORTED_FORMATS.keys()),
-        "endpoints": ["/split", "/sample", "/health"],
+        "endpoints": ["/split", "/sample", "/chunks/{job_id}/{filename}", "/health"],
     }
 
 
@@ -380,9 +428,13 @@ async def split_audio(
     chunk: str = Query(..., description="Chunk duration, e.g. 300s, 5m, 00:05:00, 300000ms"),
     overlap: str = Query("5s", description="Overlap between chunks"),
     format: str = Query("mp3", description="Output format: mp3, wav, flac, aac, ogg, m4a"),
+    delivery: str = Query("base64", description="base64 for compatibility, url for low-memory chunk downloads"),
     api_key: Optional[str] = Depends(validate_api_key),
 ) -> JSONResponse:
     format_name = validate_format(format)
+    delivery_name = delivery.lower().strip()
+    if delivery_name not in {"base64", "url"}:
+        raise HTTPException(status_code=400, detail="delivery must be 'base64' or 'url'")
     try:
         chunk_ms = parse_time_duration(chunk)
         overlap_ms = parse_time_duration(overlap)
@@ -403,10 +455,29 @@ async def split_audio(
             format_name,
             file.filename or "audio",
             size,
+            delivery_name,
         )
         return JSONResponse(content=result)
     finally:
         temp_dir.cleanup()
+
+
+@app.get("/chunks/{job_id}/{filename}")
+async def get_chunk(
+    job_id: str,
+    filename: str,
+    api_key: Optional[str] = Depends(validate_api_key),
+) -> FileResponse:
+    if "/" in job_id or "/" in filename or ".." in job_id or ".." in filename:
+        raise HTTPException(status_code=400, detail="Invalid chunk path")
+    chunk_path = JOB_DIR / job_id / filename
+    if not chunk_path.exists() or not chunk_path.is_file():
+        raise HTTPException(status_code=404, detail="Chunk not found or expired")
+    return FileResponse(
+        chunk_path,
+        media_type=get_mime_type(chunk_path.suffix.lstrip(".")),
+        filename=filename,
+    )
 
 
 @app.post("/sample")

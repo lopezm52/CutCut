@@ -3,6 +3,7 @@ FROM python:3.11-slim
 # Instalar FFmpeg y dependencias del sistema
 RUN apt-get update && apt-get install -y \
     ffmpeg \
+    curl \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
@@ -16,8 +17,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copiar código de la aplicación
 COPY . .
 
-# Crear directorio para archivos temporales
-RUN mkdir -p /tmp/audio
+# Crear directorios para archivos temporales
+RUN mkdir -p /tmp/audio /tmp/cutcut_jobs
 
 # Exponer puerto
 EXPOSE 3000
@@ -26,6 +27,8 @@ EXPOSE 3000
 ENV API_KEY=your-secret-api-key-here
 ENV MAX_UPLOAD_MB=100
 ENV MAX_CHUNKS=50
+ENV JOB_DIR=/tmp/cutcut_jobs
+ENV CHUNK_TTL_SECONDS=3600
 
 # Comando para ejecutar la aplicación
 CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "3000"]

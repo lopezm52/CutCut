@@ -42,6 +42,22 @@ curl -X POST "http://localhost:8000/sample?duration=30s&position=50%&format=mp3"
   -F "file=@sesion.m4a"
 ```
 
+### 6. Dividir en modo URL para n8n con baja memoria
+
+```bash
+curl -X POST "http://localhost:8000/split?chunk=5m&overlap=5s&format=mp3&delivery=url" \
+  -H "X-API-Key: development-key-12345" \
+  -F "file=@sesion.m4a"
+```
+
+Luego descarga cada chunk:
+
+```bash
+curl -H "X-API-Key: development-key-12345" \
+  "http://localhost:8000/chunks/JOB_ID/chunk_0000.mp3" \
+  --output chunk_0000.mp3
+```
+
 ## Ejemplo de respuesta JSON
 
 ```json
@@ -53,6 +69,7 @@ curl -X POST "http://localhost:8000/sample?duration=30s&position=50%&format=mp3"
   "overlap_duration_ms": 5000,
   "format": "mp3",
   "output_format": "mp3",
+  "delivery": "base64",
   "total_chunks": 2,
   "chunks": [
     {
@@ -71,6 +88,31 @@ curl -X POST "http://localhost:8000/sample?duration=30s&position=50%&format=mp3"
       "duration_ms": 305000,
       "mime_type": "audio/mpeg",
       "base64": "SUQzAwAAAAAfdlBSSVYAAAAOAABQZWFr..."
+    }
+  ]
+}
+```
+
+## Ejemplo de respuesta con delivery=url
+
+```json
+{
+  "filename": "ejemplo.mp3",
+  "delivery": "url",
+  "job_id": "abc123",
+  "chunk_ttl_seconds": 3600,
+  "total_chunks": 2,
+  "chunks": [
+    {
+      "index": 0,
+      "start_ms": 0,
+      "end_ms": 300000,
+      "duration_ms": 300000,
+      "mime_type": "audio/mpeg",
+      "filename": "chunk_0000.mp3",
+      "size_bytes": 4800000,
+      "path": "/chunks/abc123/chunk_0000.mp3",
+      "url": "http://localhost:8000/chunks/abc123/chunk_0000.mp3"
     }
   ]
 }

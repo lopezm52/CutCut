@@ -6,6 +6,7 @@ Microservicio en Python para dividir archivos de audio en chunks y devolverlos e
 
 - ✅ Endpoint POST `/split` con autenticación por API key
 - ✅ Endpoint POST `/sample` para extraer un fragmento ligero desde el centro, inicio, final o timestamp
+- ✅ Modo `/split?delivery=url` para devolver URLs de chunks y evitar base64 gigante en n8n
 - ✅ Soporte para múltiples formatos de audio (entrada y salida)
 - ✅ Detección automática del formato de entrada
 - ✅ Parámetros flexibles para chunk size y overlap
@@ -52,6 +53,14 @@ docker run -p 3005:3000 --env-file .env cutcut
 ```
 POST /split?chunk=300s&overlap=5s&format=mp3
 ```
+
+Por defecto `/split` mantiene compatibilidad y devuelve chunks en base64. Para workflows grandes en n8n usa:
+
+```
+POST /split?chunk=300s&overlap=5s&format=mp3&delivery=url
+```
+
+En `delivery=url`, la respuesta devuelve metadatos y `path`/`url` por chunk. n8n puede hacer `Split Out` y descargar cada chunk como binario de uno en uno con `GET /chunks/{job_id}/{filename}`.
 
 ### Endpoint de muestra para detección de idioma
 
@@ -136,6 +145,7 @@ Query Parameters:
   chunk: 5m
   overlap: 5s
   format: mp3
+  delivery: url
 
 Headers:
   X-API-Key: your-api-key
@@ -162,6 +172,7 @@ Options:
   "overlap_duration_ms": 5000,
   "format": "mp3",
   "output_format": "mp3",
+  "delivery": "base64",
   "total_chunks": 3,
   "chunks": [
     {
@@ -177,6 +188,36 @@ Options:
 }
 ```
 
+### Respuesta con `delivery=url`
+
+```json
+{
+  "filename": "audio.mp3",
+  "original_duration_ms": 900000,
+  "chunk_duration_ms": 300000,
+  "overlap_ms": 5000,
+  "format": "mp3",
+  "output_format": "mp3",
+  "delivery": "url",
+  "job_id": "abc123",
+  "chunk_ttl_seconds": 3600,
+  "total_chunks": 3,
+  "chunks": [
+    {
+      "index": 0,
+      "start_ms": 0,
+      "end_ms": 300000,
+      "duration_ms": 300000,
+      "mime_type": "audio/mpeg",
+      "filename": "chunk_0000.mp3",
+      "size_bytes": 4800000,
+      "path": "/chunks/abc123/chunk_0000.mp3",
+      "url": "https://cutcut.example.com/chunks/abc123/chunk_0000.mp3"
+    }
+  ]
+}
+```
+
 ## Variables de Entorno
 
 ```bash
@@ -187,6 +228,9 @@ API_KEY=your-secret-api-key-here
 MAX_UPLOAD_MB=100    # Tamaño máximo del archivo (MB)
 MAX_CHUNKS=50        # Número máximo de chunks por petición
 FFMPEG_TIMEOUT_SECONDS=1800
+JOB_DIR=/tmp/cutcut_jobs
+CHUNK_TTL_SECONDS=3600
+PUBLIC_BASE_URL=https://cutcut.example.com
 ```
 
 ## Formatos Soportados
