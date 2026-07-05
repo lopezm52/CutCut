@@ -1,14 +1,16 @@
 # Audio Splitting Microservice
 
-Microservicio en Python para dividir archivos de audio en chunks y devolverlos en base64.
+Microservicio en Python para dividir archivos de audio en chunks y devolverlos en base64 usando FFmpeg sin cargar el audio completo en RAM.
 
 ## Características
 
 - ✅ Endpoint POST `/split` con autenticación por API key
+- ✅ Endpoint POST `/sample` para extraer un fragmento ligero desde el centro, inicio, final o timestamp
 - ✅ Soporte para múltiples formatos de audio (entrada y salida)
 - ✅ Detección automática del formato de entrada
 - ✅ Parámetros flexibles para chunk size y overlap
 - ✅ Retorna chunks en base64 con metadatos completos
+- ✅ Procesamiento disco-a-disco con FFmpeg/FFprobe, evitando el OOM de Pydub en audios largos
 - ✅ Configuración mediante variables de entorno
 - ✅ Listo para despliegue con Coolify
 
@@ -50,6 +52,14 @@ docker run -p 3005:3000 --env-file .env cutcut
 ```
 POST /split?chunk=300s&overlap=5s&format=mp3
 ```
+
+### Endpoint de muestra para detección de idioma
+
+```
+POST /sample?duration=30s&position=50%&format=mp3
+```
+
+`/sample` devuelve un único fragmento en base64. Es el endpoint recomendado para detectar idioma antes de transcribir todos los chunks en n8n.
 
 ### Health Check
 
@@ -108,6 +118,11 @@ curl -X POST "http://localhost:8000/split?chunk=300s&format=m4a" \
 
 # Health check
 curl http://localhost:8000/health
+
+# Sample central de 30 segundos para detección de idioma
+curl -X POST "http://localhost:3005/sample?duration=30s&position=50%&format=mp3" \
+  -H "X-API-Key: your-api-key" \
+  -F "file=@podcast.m4a"
 ```
 
 ### Ejemplo de uso con n8n
@@ -143,7 +158,9 @@ Options:
   "filename": "audio.mp3",
   "original_duration_ms": 900000,
   "chunk_duration_ms": 300000,
+  "overlap_ms": 5000,
   "overlap_duration_ms": 5000,
+  "format": "mp3",
   "output_format": "mp3",
   "total_chunks": 3,
   "chunks": [
@@ -153,6 +170,7 @@ Options:
       "end_ms": 300000,
       "duration_ms": 300000,
       "mime_type": "audio/mpeg",
+      "data": "SUQzAwAAAAAfdlBSSVYAAAAOAABQZWFr...",
       "base64": "SUQzAwAAAAAfdlBSSVYAAAAOAABQZWFr..."
     }
   ]
@@ -168,6 +186,7 @@ API_KEY=your-secret-api-key-here
 # Opcionales (con valores por defecto)
 MAX_UPLOAD_MB=100    # Tamaño máximo del archivo (MB)
 MAX_CHUNKS=50        # Número máximo de chunks por petición
+FFMPEG_TIMEOUT_SECONDS=1800
 ```
 
 ## Formatos Soportados

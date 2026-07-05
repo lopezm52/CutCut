@@ -34,6 +34,14 @@ curl -X POST "http://localhost:8000/split?chunk=120000ms&overlap=2000ms&format=f
   -F "file=@musica.wav"
 ```
 
+### 5. Extraer un sample central para detección de idioma
+
+```bash
+curl -X POST "http://localhost:8000/sample?duration=30s&position=50%&format=mp3" \
+  -H "X-API-Key: development-key-12345" \
+  -F "file=@sesion.m4a"
+```
+
 ## Ejemplo de respuesta JSON
 
 ```json
@@ -41,7 +49,9 @@ curl -X POST "http://localhost:8000/split?chunk=120000ms&overlap=2000ms&format=f
   "filename": "ejemplo.mp3",
   "original_duration_ms": 600000,
   "chunk_duration_ms": 300000,
+  "overlap_ms": 5000,
   "overlap_duration_ms": 5000,
+  "format": "mp3",
   "output_format": "mp3",
   "total_chunks": 2,
   "chunks": [
@@ -51,6 +61,7 @@ curl -X POST "http://localhost:8000/split?chunk=120000ms&overlap=2000ms&format=f
       "end_ms": 300000,
       "duration_ms": 300000,
       "mime_type": "audio/mpeg",
+      "data": "SUQzAwAAAAAfdlBSSVYAAAAOAABQZWFr...",
       "base64": "SUQzAwAAAAAfdlBSSVYAAAAOAABQZWFr..."
     },
     {
